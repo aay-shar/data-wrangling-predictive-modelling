@@ -1,0 +1,9 @@
+# Python 3.12
+# Assignments 1 and 2. Assignments 3 and 4 are R, see README for those packages.
+
+pandas
+numpy
+matplotlib
+scikit-learn
+py_stringmatching
+jupyter

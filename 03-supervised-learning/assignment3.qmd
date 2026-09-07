@@ -1,0 +1,279 @@
+---
+title: "Supervised learning competition"
+author: 
+  - Aayush Sharma
+  - Elli Rapti
+  - Mansi Budamagunta
+  - Nishant Rajamani
+  - Petros Polychronopoulos
+date: last-modified
+format:
+  html:
+    toc: true
+    self-contained: true
+    code-fold: true
+    df-print: kable
+---
+
+```{r}
+# Required packages (install if needed):
+# install.packages(c("tidyverse", "GGally", "e1071", "skimr", "tree", "caret"))
+```
+
+# Introduction
+
+In this assignment, we attempt to predict the exam scores for students based on other data about their school, family, social life etc. We begin by exploring the provided datasets using the principles of EDA. Then we preprocess the data to train predictions models on it. We train and analyse the results of the following models: multiple linear regression, support vector machines, and decision trees. We use 10-fold cross validation to compare the results of these models against each other and a trivial baseline. Then we use our best model to predict the exam scores on the test dataset.
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(GGally)
+library(e1071)
+library(skimr)
+library(tree)
+library(caret)
+library(dplyr)
+```
+
+# Data description
+
+We begin by loading the data and looking at the variables present. Then we compute some summary statistics and check for missing values to understand the dataset better.
+
+```{r}
+# Load the training and test data
+train <- readRDS("train.rds")
+test <- readRDS("test.rds")
+
+# Compute summary statistics
+skim(train)
+```
+
+We can see that the provided datasets do have the expected structure. The training data contains 316 rows and 31 columns. The test data contains 79 rows and 30 columns (all having the same type as training data, exluding the target variable). Of the 30 predictor variables, 17 are categorical and 13 numeric. There are no missing values in the training dataset.
+
+Next we plot the distribution of the target variable (score):
+
+```{r}
+# Plotting the mean and distribution of the score
+ggplot(train, aes(score)) + geom_density() + geom_vline(xintercept =mean(train$score))
+```
+
+It’s roughly bell-shaped distribution, so the mean (also plotted) would be a good choice for a trivial baseline to compare more complex against.
+
+We also compute the correlation matrix to get an idea of the relationships between the numeric variables. In particular, we are interested in the correlation of the predictor variables with the score, to get an intuition of which variables can have predictive power during training our models.
+
+```{r}
+#| warning: false
+# Correlation between numeric variables
+ggcorr(train, label = TRUE, label_round = 2, type = "lower", stars=TRUE)
+```
+
+score – failures: seem to have strong correlation. We can see that the more failures they have, the score is lower. We plot a boxplot to explore this further.
+
+```{r}
+# Failures vs score
+ggplot(train, aes(x = as.factor(failures), y = score, fill = as.factor(failures))) +
+  geom_boxplot(alpha = 0.7, outlier.color = "black") +
+  scale_fill_brewer(palette = "Reds") +
+  theme_minimal() +
+  labs(
+    title = "Score VS failures",
+    x = "failures",
+    y = "Score"
+  ) +
+  theme(legend.position = "none")
+```
+
+# Model description
+
+We compare three different regression models to predict student exam scores: multiple linear regression, support vector machines (SVM), and decision trees. Multiple linear regression serves as our baseline parametric model, assuming a linear relationship between features and the target variable. It estimates coefficients for each predictor that minimize the squared difference between predicted and actual scores. This model is interpretable and computationally efficient, making it a natural starting point for regression tasks.
+
+The other two models can capture non-linear relationships in the data. SVM with a radial basis function kernel maps the data to a higher-dimensional space where complex patterns become linearly separable. Decision trees partition the feature space through recursive splits based on feature values, creating interpretable rules but risking overfitting.
+
+# Data transformation and pre-processing
+
+Since we have used different types of models, the preprocessing steps also differ across them. We have included all variables for prediction in all models. There has been no preprocessing done for SVM & decision trees. The categorical variables have been one-hot encoded for multiple linear regression.
+
+```{r}
+# Ensure categorical columns are factors
+cat_cols <- names(train)[sapply(train, function(x) is.factor(x) || is.character(x))]
+train[cat_cols] <- lapply(train[cat_cols], as.factor)
+
+# one hot encoding
+dv <- dummyVars(~ ., data = train, fullRank = TRUE)
+train_encoded <- predict(dv, newdata = train)
+train_encoded <- as.data.frame(train)
+```
+
+# Model comparison
+
+We use 10-fold cross validation using the Mean Squared Error to compare models. We also compare the cross validated MSE of each model with the MSE obtained with the trivial baseline (mean) to check if the more completed models are learning any meaningful patterns from the predictor variables in the training data.
+
+```{r}
+# The function to compute MSE
+mse <- function(y_true, y_pred) {mean((y_true - y_pred)^2)}
+
+# Calculating MSE for the trivial baseline
+mse_trivial <- mse(train$score, mean(train$score))
+
+ #### Regression  ####
+# Cross Validation function for regression
+cv_lm <- function(formula, dataset, k) {
+  # We can do some error checking before starting the function
+  stopifnot(is_formula(formula))       # formula must be a formula
+  stopifnot(is.data.frame(dataset))    # dataset must be data frame
+  stopifnot(is.integer(as.integer(k))) # k must be convertible to int
+  
+  # first, add a selection column to the dataset as before
+  n_samples  <- nrow(dataset)
+  select_vec <- rep(1:k, length.out = n_samples)
+  set.seed(123)
+  data_split <- dataset %>% mutate(folds = sample(select_vec))
+  
+  # initialise an output vector of k mse values, which we 
+  # will fill by using a _for loop_ going over each fold
+  mses <- rep(0, k)
+  
+  # start the for loop
+  for (i in 1:k) {
+    # split the data in train and validation set
+    data_train <- data_split %>% filter(folds != i)
+    data_valid <- data_split %>% filter(folds == i)
+    
+    # calculate the model on this data
+    model_i <- lm(formula = formula, data = data_train)
+    
+    # Extract the y column name from the formula
+    y_column_name <- as.character(formula)[2]
+    
+    # calculate the mean squared error and assign it to mses
+    mses[i] <- mse(y_true = data_valid[[y_column_name]],
+                   y_pred = predict(model_i, newdata = data_valid))
+  }
+  
+  # now we have a vector of k mse values. All we need is to
+  # return the mean mse!
+  mean(mses)
+}
+mse_regression <- cv_lm(formula = score ~ ., dataset = train_encoded, k = 10)
+
+#### SVM ####
+#Cross validation with SVM
+cv_svm <- function(formula, dataset, k) {
+  # We can do some error checking before starting the function
+  stopifnot(is_formula(formula))       # formula must be a formula
+  stopifnot(is.data.frame(dataset))    # dataset must be data frame
+  stopifnot(is.integer(as.integer(k))) # k must be convertible to int
+  
+  # first, add a selection column to the dataset as before
+  n_samples  <- nrow(dataset)
+  select_vec <- rep(1:k, length.out = n_samples)
+  set.seed(123)
+  data_split <- dataset %>% mutate(folds = sample(select_vec))
+  
+  # initialise an output vector of k mse values, which we 
+  # will fill by using a _for loop_ going over each fold
+  mses <- rep(0, k)
+  
+  # start the for loop
+  for (i in 1:k) {
+    # split the data in train and validation set
+    data_train <- data_split %>% filter(folds != i)
+    data_valid <- data_split %>% filter(folds == i)
+    
+    # calculate the model on this data
+    model_i <- svm(formula = formula, data = data_train)
+    
+    # Extract the y column name from the formula
+    y_column_name <- as.character(formula)[2]
+    
+    # calculate the mean squared error and assign it to mses
+    mses[i] <- mse(y_true = data_valid[[y_column_name]],
+                   y_pred = predict(model_i, newdata = data_valid))
+  }
+  
+  # return the mean mse
+  mean(mses)
+}
+mse_svm <- cv_svm(score ~ ., dataset = train, k = 10)
+
+#### Decison Trees ####
+# Kfold cv that prunes inside each fold and evaluates mse on the held out fold,
+# and records the best tree size selected per fold.
+cv_tree_pruned <- function(formula, data, k = 10, seed = 1) {
+  stopifnot(is_formula(formula))
+  stopifnot(is.data.frame(data))
+  stopifnot(is.integer(as.integer(k)))
+  set.seed(seed)
+  n <- nrow(data)
+  folds <- sample(rep(1:k, length.out = n))
+  y_name <- all.vars(formula)[1]
+  #placeholders for mse and sizes
+  fold_mse   <- numeric(k)
+  best_sizes <- integer(k)
+  
+  for (i in seq_len(k)) {
+    idx_train <- folds != i
+    train_df  <- data[idx_train, , drop = FALSE]
+    valid_df  <- data[!idx_train, , drop = FALSE]
+    
+    assign(".cvdata_fold", train_df, envir = .GlobalEnv)
+    
+    #tree on the fold's training split
+    full <- tree(formula, data = .cvdata_fold)
+    
+    #Cross-validate within the training split to pick size
+    cv  <- cv.tree(full)              # dev is rss for regression trees
+    best_size <- cv$size[which.min(cv$dev)]
+    best_sizes[i] <- best_size
+    
+    #Prune to the chosen size and evaluate on the folds validation split
+    pruned <- prune.tree(full, best = best_size)
+    pred   <- predict(pruned, newdata = valid_df)
+    fold_mse[i] <- mean( (valid_df[[y_name]] - pred)^2 )
+  }
+  
+  list(per_fold_mse = fold_mse,
+       mean_mse     = mean(fold_mse),
+       sd_mse       = sd(fold_mse),
+       best_sizes   = best_sizes,
+       chosen_size  = as.integer(median(best_sizes)))  #a stable single choice
+}
+
+#Running the function on the students data
+cv_res <- cv_tree_pruned(score ~ ., train, k = 10, seed = 12)
+mse_tree <- cv_res$mean_mse
+best_tree_size  <- cv_res$chosen_size
+```
+
+# Chosen model - SVM
+
+Below, we have listed the cross validated MSE we received for the 3 models analysed against the MSE for the trivial baseline. We see that SVM and decision tree perform better than multiple linear regression indicating that there is a non-linear relationship between the predictor variables and the target. All 3 models perform better than the trivial baseline. Since the MSE obtained for SVM and Decision trees are quite close, we choose SVM as our model as single decision trees tend to have a bias and may perform worse on test data.
+
+```{r}
+data.frame(
+  model = c("Trivial Baseline (Mean)", "Multiple Linear Regression", "SVM", "Decision Tree"),
+  mse = c(mse_trivial, mse_regression, mse_svm, mse_tree)
+)
+```
+
+```{r}
+# Predicting scores for the test dataset
+
+# train SVM on the training data
+svm_mod <- svm(score ~ ., data = train, kernel = "radial")
+
+# Predict on test set and save the file
+predictions <- predict(svm_mod, test)
+saveRDS(as.numeric(predictions), "predictions.rds")
+```
+
+# Team member contributions
+
+-   Aayush Sharma: Training and analysis of Decision Trees
+-   Elli Rapti: Training and analysis of Multiple Linear Regression
+-   Mansi Budamagunta: Compiling results and writing conclusion
+-   Nishant Rajamani: Exploratory data analysis and writing the report
+-   Petros Polychronopoulos: Training and analysis of SVM

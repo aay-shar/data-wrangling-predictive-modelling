@@ -1,0 +1,220 @@
+---
+title: "Text clustering"
+author:
+- Aayush Sharma
+- Elli Rapti
+- Mansi Budamagunta
+- Nishant Rajamani
+- Petros Polychronopoulos
+date: last-modified
+format: 
+  html:
+    toc: true
+    self-contained: true
+    code-fold: true
+    df-print: kable
+---
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+# Required packages (install if needed):
+# install.packages(c("text2vec", "tm", "tidyverse", "wordcloud", "magrittr", "fastcluster", "proxy", "cluster"))
+
+# load packages
+library(text2vec)
+library(tm)
+library(tidyverse)
+library(wordcloud)
+library(magrittr)
+library(fastcluster)
+library(proxy)
+library(cluster)
+
+# load the movie review dataset from the text2vec package
+data("movie_review")
+```
+
+# Data description
+We load the IMDB reviews dataset from the the `text2vec` package. It contains 5,000 movie reviews that were collected for sentiment analysis. The dataset contains 5000 rows (1 per review) and 3 columns (corresponding to the id, sentiment score, and content of each review).
+
+```{r}
+#| output: false # Supressing output since it is verbose
+# view the first few rows of the dataset
+head(movie_review)
+```
+
+```{r}
+# look at the stucture of the dataset
+str(movie_review)
+```
+
+We see that the dataset has close to an equal number of positive & negative reviews.
+
+```{r}
+# check how many reviews with sentiment score 0/1
+table(movie_review$sentiment)
+```
+
+Most of the reviews are short, but a small number of people write more detailed ones as we can see from the histogram below. 
+
+```{r}
+# visualize distribution of review lengths
+movie_review$length <- sapply(strsplit(movie_review$review, " "), length)
+ggplot(movie_review, aes(x = length)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(title = "Distribution of Review Lengths", x = "Number of Words", y = "Frequency")
+```
+
+We also plot a word cloud to show the most frequent words that appear in the reviews. We can see that the most common words relate to movie content. There are also some stop words (like the, this, etc.) which will be removed as part of the preprocessing steps below.
+```{r}
+#| warning: false
+# plot wordcloud
+movie_review %$% wordcloud(review, 
+                           min.freq = 10, 
+                           max.words = 100, 
+                           random.order = FALSE,
+                           colors = brewer.pal(8, "Dark2"))
+```
+
+# Text pre-processing
+
+We apply the following preprocessing steps to clean and standardize the review text before tokenization:
+
+- Lowercasing: All text was converted to lowercase.
+- HTML Tag Removal: HTML tags (e.g., \<br\>) were removed.
+- Punctuation Removal: All punctuation marks were replaced with spaces.
+- Number Removal: All digits were removed.
+- Whitespace Normalization: Multiple spaces were collapsed into a single space, and leading/trailing whitespace was trimmed.
+
+Then we converted the text into tokens, created a vocabulary, removed the standard stop words from it, and pruned the vocabulary to only inlcude terms that appeared at least 5 times across the entire corpus.
+
+```{r}
+# preprocessing the text
+prep_fun <- function(text) {
+  text <- tolower(text)
+  text <- gsub("<.*?>", " ", text)
+  text <- gsub("[[:punct:]]", " ", text)
+  text <- gsub("\\d+", " ", text)
+  text <- gsub("\\s+", " ", text)
+  text <- trimws(text)
+  text
+}
+
+# converting text to tokens
+tok_fun  <- word_tokenizer
+it <- itoken(movie_review$review,
+             preprocessor = prep_fun,
+             tokenizer = tok_fun,
+             progressbar = FALSE)
+
+#creating vocab by removing term_count < 5 and stopwords
+vocab <- create_vocabulary(it, stopwords = stopwords("en"))
+vocab <- prune_vocabulary(vocab, term_count_min = 5)
+```
+
+# Text representation
+
+Using this pruned vocabulary, we first create a Document-Term Matrix (DTM). We then transform the DTM into a TF-IDF (Term Frequency-Inverse Document Frequency) matrix. So we now have a text representation that down-weights common words and highlights terms that are important to specific documents, providing a better representation of the text's content.
+
+Since the TF-IDF matrix is high-dimensional and sparse, we used Latent Semantic Analysis (LSA) to reduce dimensionality. The `LSA$new()` function was used to reduce the data to 100 topics (dimensions). This LSA-transformed matrix served as the input for the next stage.
+
+```{r}
+# create DTM and TF-IDF
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it, vectorizer)
+tfidf <- TfIdf$new()
+dtm_tfidf <- tfidf$fit_transform(dtm)
+
+# set seed for reproducibility
+set.seed(123)
+
+#using LSA for dimensionality reduction
+lsa <- LSA$new(n_topics = 100)
+X <- lsa$fit_transform(dtm_tfidf)
+```
+
+# Text clustering
+
+We applied two clustering approaches to compare their performance on the LSA-transformed movie review data: K-means clustering and hierarchical clustering.
+
+K-means partitions the data into k clusters by iteratively assigning each document to the nearest cluster centroid and updating centroids to minimize within-cluster variance. We first standardized the LSA features using scale() to ensure all dimensions contributed equally to the distance calculations. We then applied K-means with both k=5 and k=10 clusters using Euclidean distance. We set nstart=20 to run the algorithm multiple times with different random initializations and select the best solution, helping avoid poor local optima.
+
+Hierarchical clustering builds clusters by successively merging the closest pairs based on a linkage criterion, creating a dendrogram that can be cut at any height to obtain the desired number of clusters. We used cosine distance instead of Euclidean distance, which is often preferred for text data because it measures the angle between document vectors rather than their absolute magnitude. We applied complete linkage, which calculates the distance between clusters as the maximum distance between any two points in the clusters. We then cut the resulting dendrogram at k=5 and k=10 clusters to match the K-means solutions for comparison.
+
+```{r}
+#| warning: false
+
+# set seed for reproducibility
+set.seed(123)
+
+### K-means clustering
+# Scale the LSA matrix
+X_sc <- scale(as.matrix(X))
+# Compute Euclidean distances based on the scaled matrix
+dX   <- dist(X_sc, method = "euclidean")
+# Perform K-means clustering for k=5 & k=10 with random initialization
+km5  <- kmeans(X_sc, centers = 5, nstart = 20)
+km10 <- kmeans(X_sc, centers = 10, nstart = 20)
+
+
+### Hierarchical clustering
+# Compute cosine distances on unscaled LSA matrix
+dX_cosine <- dist(X, method = "cosine")
+# Create Heirarchial clusters using complete linkage
+hc   <- fastcluster::hclust(dX_cosine, method = "complete")
+# Cut the tree at k=5 & k=10 for comparison with k-means
+hc5  <- cutree(hc, k = 5)
+hc10 <- cutree(hc, k = 10)
+```
+
+# Evaluation & model comparison
+
+We used the Silhouette coefficient for internal validation to compare the clustering methods. The Silhouette coefficient measures how similar each point is to its own cluster compared to other clusters, with values ranging from -1 to 1 where higher values indicate better clustering. We chose this metric because it works well across different distance metrics and provides an intuitive interpretation of cluster quality. Each method was evaluated using its own distance metric—Euclidean distance for K-means and cosine distance for hierarchical clustering—to ensure a fair comparison.
+
+```{r}
+# function to calculate silhouette coefficients for each model
+sil_summary <- function(labels, dmat) {
+  sil <- silhouette(labels, dmat)          
+  data.frame(mean_silhouette = mean(sil[, "sil_width"]))
+}
+
+# evaluate each model with its corresponding distance metric
+res_sil <- bind_rows(
+  cbind(model = "K-means", k = 5,  sil_summary(km5$cluster,  dX)),
+  cbind(model = "K-means", k = 10, sil_summary(km10$cluster, dX)),
+  cbind(model = "Hierarchical", k = 5,  sil_summary(hc5, dX_cosine)),
+  cbind(model = "Hierarchical", k = 10, sil_summary(hc10, dX_cosine))
+)
+
+# combine silhouette scores with cluster size distributions
+res_sil$Cluster_Sizes <- c(
+  paste(sort(km5$size, decreasing = TRUE), collapse = ", "),
+  paste(sort(km10$size, decreasing = TRUE), collapse = ", "),
+  paste(sort(table(hc5), decreasing = TRUE), collapse = ", "),
+  paste(sort(table(hc10), decreasing = TRUE), collapse = ", ")
+)
+
+res_sil
+```
+
+The results show poor clustering performance across both methods. K-means achieved slightly positive Silhouette scores, while hierarchical clustering produced mixed results with a small positive score for k=5 but a negative score for k=10. However, all scores are very close to zero, indicating weak cluster separation overall. A closer look at the cluster distributions reveals that K-means created highly imbalanced clusters, with several singleton or very small clusters, while the two largest clusters contained most of the data (for k=5). In contrast, hierarchical clustering produced more balanced cluster sizes but at the cost of worse separation for k=10, as reflected in the negative Silhouette score.
+
+Increasing the number of clusters from 5 to 10 did not improve performance for either method. The combination of low Silhouette scores and imbalanced clusters suggests that the IMDB reviews may not have strong natural cluster structure in the LSA representation space, at least not at these cluster numbers. The silhouette plots below provide a visual confirmation of these findings, showing the distribution of silhouette widths across clusters for each method.
+
+```{r}
+# Plot the silhouette widths
+plot(silhouette(km5$cluster, dX), border = NA, main = "K-means (k=5)")
+plot(silhouette(km10$cluster, dX), border = NA, main = "K-means (k=10)")
+plot(silhouette(hc5, dX_cosine), border = NA, main = "Hierarchical (k=5)")
+plot(silhouette(hc10, dX_cosine), border = NA, main = "Hierarchical (k=10)")
+```
+
+# Team member contributions
+
+-   Aayush Sharma: Evaluation & model comparison
+-   Elli Rapti: Text representation & K-means clustering
+-   Mansi Budamagunta: Compiling the code and writing the report
+-   Nishant Rajamani: Text preprocessing & Heirarchial clustering
+-   Petros Polychronopoulos: Exploratory data analysis
