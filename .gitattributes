@@ -1,0 +1,4 @@
+*.html linguist-generated
+*.ipynb linguist-language=Python
+*.qmd linguist-language=R
+*.sql linguist-detectable
